@@ -1,1 +1,1 @@
-Basic to intermediate to advanced to Professional level Capstone projects
+Beginner to intermediate to advanced to Professional level Capstone projects
