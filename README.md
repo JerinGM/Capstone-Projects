@@ -1,2 +1,1 @@
-# Capstone-Projects
-Capstone Projects on Python
+Basic to intermediate to advanced to Professional level Capstone projects
