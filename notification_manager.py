@@ -19,3 +19,4 @@ class NotificationManager:
             )
             # Prints if successfully sent.
             print(message.sid)
+            
