@@ -6,6 +6,7 @@ from selenium.webdriver.common.keys import Keys
 from bs4 import BeautifulSoup
 from time import sleep
 import requests
+from collections import OrderedDict
 
 # Scraping data from Zillow
 header = {
