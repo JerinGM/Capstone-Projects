@@ -1,0 +1,762 @@
+############################# MAIN
+
+from datetime import date
+from flask import Flask, abort, render_template, redirect, url_for, flash
+from flask_bootstrap import Bootstrap5
+from flask_ckeditor import CKEditor, CKEditorField
+from flask_gravatar import Gravatar
+from flask_login import UserMixin, login_user, LoginManager, current_user, logout_user
+from flask_sqlalchemy import SQLAlchemy
+from functools import wraps
+from werkzeug.security import generate_password_hash, check_password_hash
+from sqlalchemy.orm import relationship
+from wtforms import StringField, PasswordField, SubmitField
+
+from forms import CreatePostForm, RegisterForm
+from wtforms.validators import DataRequired, URL
+from flask_wtf import FlaskForm
+from functools import wraps
+from flask import abort
+from flask_gravatar import Gravatar
+
+
+######################### ADMIN ONLY DECORATOR TO BE USED WITH ADD AND DELETE
+def admin_only(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        #If id is not 1 then return abort with 403 error
+        if current_user.id != 1:
+            return abort(403)
+        #Otherwise continue with the route function
+        return f(*args, **kwargs)
+    return decorated_function
+
+
+
+app = Flask(__name__)
+app.config['SECRET_KEY'] = '8BYkEfBA6O6donzWlSihBXox7C0sKR6b'
+ckeditor = CKEditor(app)
+Bootstrap5(app)
+
+# TODO: Configure Flask-Login
+
+
+
+
+# CONNECT TO DB
+# Connect to the first database (posts.db)
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///posts.db'
+# #Creating second db
+# app.config['SQLALCHEMY_BINDS'] = {
+#     'blog': 'sqlite:///blog.db'
+# }
+
+db = SQLAlchemy()
+db.init_app(app)
+
+login_manager = LoginManager()
+login_manager.init_app(app)
+
+
+# Create a user_loader callback - User is class
+@login_manager.user_loader
+def load_user(user_id):
+    return db.get_or_404(User, user_id)
+
+
+# TODO: Create a User table for all your registered users.
+class User(UserMixin, db.Model):
+    # __bind_key__ = 'blog'  # Use the 'blog' bind for this model - new db
+    __tablename__ = "users"
+    id = db.Column(db.Integer, primary_key=True)
+    email = db.Column(db.String(100), unique=True)
+    password = db.Column(db.String(100))
+    name = db.Column(db.String(1000))
+    posts = relationship("BlogPost", back_populates="author")
+    comments = relationship("Comment", back_populates="comment_author")
+
+
+
+
+with app.app_context():
+    db.create_all()
+
+# CONFIGURE TABLES
+class BlogPost(db.Model):
+    __tablename__ = "blog_posts"
+
+    id = db.Column(db.Integer, primary_key=True)
+
+    # Create Foreign Key, "users.id" the users refers to the tablename of User.
+    author_id = db.Column(db.Integer, db.ForeignKey("users.id"))
+    # Create reference to the User object, the "posts" refers to the posts property in the User class.
+    author = relationship("User", back_populates="posts")
+
+    title = db.Column(db.String(250), unique=True, nullable=False)
+    subtitle = db.Column(db.String(250), nullable=False)
+    date = db.Column(db.String(250), nullable=False)
+    body = db.Column(db.Text, nullable=False)
+    # author = db.Column(db.String(250), nullable=False)
+    img_url = db.Column(db.String(250), nullable=False)
+
+
+    #***************Parent Relationship*************#
+    comments = relationship("Comment", back_populates="parent_post")
+
+
+with app.app_context():
+    db.create_all()
+
+
+class Comment(db.Model):
+    __tablename__ = "comments"
+    id = db.Column(db.Integer, primary_key=True)
+    author_id = db.Column(db.Integer, db.ForeignKey("users.id"))
+    comment_author = relationship("User", back_populates="comments")
+
+    # ***************Child Relationship*************#
+    post_id = db.Column(db.Integer, db.ForeignKey("blog_posts.id"))
+    parent_post = relationship("BlogPost", back_populates="comments")
+    text = db.Column(db.Text, nullable=False)
+
+with app.app_context():
+    db.create_all()
+
+
+
+
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    form = RegisterForm()
+
+    if form.validate_on_submit():
+        result = db.session.execute(db.select(User).where(User.email == form.email.data))
+        user = result.scalar()
+        if user:
+            # User already exists
+            flash("You've already signed up with that email, log in instead!")
+            return redirect(url_for('login'))
+        hash_and_salted_password = generate_password_hash(
+            form.password.data,
+            method='pbkdf2:sha256',
+            salt_length=8
+        )
+        new_user = User(
+            email=form.email.data,
+            name=form.name.data,
+            password=hash_and_salted_password
+        )
+
+        db.session.add(new_user)
+        db.session.commit()
+        login_user(new_user)
+        return redirect(url_for("get_all_posts"))
+    return render_template("register.html", form=form)
+
+
+class LoginForm(FlaskForm):
+    email = StringField('Email', validators=[DataRequired()])
+    password = PasswordField('Password', validators=[DataRequired()])
+    submit = SubmitField('LET ME IN!')
+
+
+
+
+
+# TODO: Retrieve a user from the database based on their email.
+@app.route('/login', methods=["GET", "POST"])
+def login():
+    form = LoginForm()
+    if form.validate_on_submit():
+        password = form.password.data
+        result = db.session.execute(db.select(User).where(User.email == form.email.data))
+        # Note, email in db is unique so will only have one result.
+        user = result.scalar()
+        # Email doesn't exist
+        if not user:
+            flash("That email does not exist, please try again.")
+            return redirect(url_for('login'))
+        # Password incorrect
+        elif not check_password_hash(user.password, password):
+            flash('Password incorrect, please try again.')
+            return redirect(url_for('login'))
+        else:
+            login_user(user)
+            return redirect(url_for('get_all_posts'))
+
+    return render_template("login.html", form=form)
+
+
+@app.route('/logout')
+def logout():
+    logout_user()
+    return redirect(url_for('get_all_posts'))
+
+
+@app.route('/')
+def get_all_posts():
+    result = db.session.execute(db.select(BlogPost))
+    posts = result.scalars().all()
+    return render_template("index.html", all_posts=posts)
+
+
+class CommentForm(FlaskForm):
+    comment_text = CKEditorField("Comment", validators=[DataRequired()])
+    submit = SubmitField("Submit Comment")
+
+
+# TODO: Allow logged-in users to comment on posts
+@app.route("/post/<int:post_id>")
+def show_post(post_id):
+    requested_post = db.get_or_404(BlogPost, post_id)
+    comment_form = CommentForm()
+    # Only allow logged-in users to comment on posts
+    if comment_form.validate_on_submit():
+        if not current_user.is_authenticated:
+            flash("You need to login or register to comment.")
+            return redirect(url_for("login"))
+
+        new_comment = Comment(
+            text=comment_form.comment_text.data,
+            comment_author=current_user,
+            parent_post=requested_post
+        )
+        db.session.add(new_comment)
+        db.session.commit()
+    return render_template("post.html", post=requested_post, current_user=current_user, form=comment_form)
+
+
+# TODO: Use a decorator so only an admin user can create a new post
+@app.route("/new-post", methods=["GET", "POST"])
+@admin_only
+def add_new_post():
+    form = CreatePostForm()
+    if form.validate_on_submit():
+        new_post = BlogPost(
+            title=form.title.data,
+            subtitle=form.subtitle.data,
+            body=form.body.data,
+            img_url=form.img_url.data,
+            author=current_user,
+            date=date.today().strftime("%B %d, %Y")
+        )
+        db.session.add(new_post)
+        db.session.commit()
+        return redirect(url_for("get_all_posts"))
+    return render_template("make-post.html", form=form, current_user=current_user)
+
+
+# TODO: Use a decorator so only an admin user can edit a post
+@app.route("/edit-post/<int:post_id>", methods=["GET", "POST"])
+def edit_post(post_id):
+    post = db.get_or_404(BlogPost, post_id)
+    edit_form = CreatePostForm(
+        title=post.title,
+        subtitle=post.subtitle,
+        img_url=post.img_url,
+        author=post.author,
+        body=post.body
+    )
+    if edit_form.validate_on_submit():
+        post.title = edit_form.title.data
+        post.subtitle = edit_form.subtitle.data
+        post.img_url = edit_form.img_url.data
+        post.author = current_user
+        post.body = edit_form.body.data
+        db.session.commit()
+        return redirect(url_for("show_post", post_id=post.id))
+    return render_template("make-post.html", form=edit_form, is_edit=True)
+
+
+# TODO: Use a decorator so only an admin user can delete a post
+@app.route("/delete/<int:post_id>")
+@admin_only
+def delete_post(post_id):
+    post_to_delete = db.get_or_404(BlogPost, post_id)
+    db.session.delete(post_to_delete)
+    db.session.commit()
+    return redirect(url_for('get_all_posts'))
+
+
+@app.route("/about")
+def about():
+    return render_template("about.html")
+
+
+@app.route("/contact")
+def contact():
+    return render_template("contact.html")
+
+
+
+# For adding profile images to the comment section
+gravatar = Gravatar(app,
+                    size=100,
+                    rating='g',
+                    default='retro',
+                    force_default=False,
+                    force_lower=False,
+                    use_ssl=False,
+                    base_url=None)
+
+
+
+if __name__ == "__main__":
+    app.run(debug=True, port=5002)
+
+
+########################## POST
+{% include "header.html" %}
+
+<!-- Page Header-->
+<header class="masthead" style="background-image: url('{{post.img_url}}')">
+  <div class="container position-relative px-4 px-lg-5">
+    <div class="row gx-4 gx-lg-5 justify-content-center">
+      <div class="col-md-10 col-lg-8 col-xl-7">
+        <div class="post-heading">
+          <h1>{{ post.title }}</h1>
+          <h2 class="subheading">{{ post.subtitle }}</h2>
+          <span class="meta"
+            >Posted by
+<!--            <a href="#">{{ post.author }}</a>-->
+            <a href="#">{{ post.author.name }}</a>
+            on {{ post.date }}
+          </span>
+        </div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<!-- Post Content -->
+<article>
+  <div class="container px-4 px-lg-5">
+    <div class="row gx-4 gx-lg-5 justify-content-center">
+      <div class="col-md-10 col-lg-8 col-xl-7">
+        {{ post.body|safe }}
+        <!--Only show Edit Post button if user id is 1 (admin user) -->
+        {% if current_user.id == 1 %}
+        <div class="d-flex justify-content-end mb-4">
+          <a
+            class="btn btn-primary float-right"
+            href="{{url_for('edit_post', post_id=post.id)}}"
+            >Edit Post</a
+          >
+        </div>
+        {% endif %}
+
+        <!-- Comments Area -->
+        <!-- Load the CKEditor -->
+        {{ ckeditor.load() }}
+        <!-- Configure it with the name of the form field from CommentForm -->
+        {{ ckeditor.config(name='comment_text') }}
+        <!-- Create the wtf quick form from CommentForm -->
+        {{ render_form(form, novalidate=True, button_map={"submit": "primary"}) }}
+        <div class="comment">
+          <ul class="commentList">
+            <!-- Show all comments -->
+            {% for comment in post.comments: %}
+            <li>
+              <div class="commenterImage">
+                <img
+                  src="../static/assets/img/default-profile.jpg"
+                />
+              </div>
+              <div class="commentText">
+                {{comment.text|safe}}
+                <span class="sub-text">{{comment.comment_author.name}}</span>
+              </div>
+            </li>
+            {% endfor %}
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+</article>
+
+{% include "footer.html" %}
+
+
+################################# MAKE POST
+{% from "bootstrap5/form.html" import render_form %} {% block content %} {%
+include "header.html" %}
+
+<!-- Page Header -->
+<header
+  class="masthead"
+  style="background-image: url('../static/assets/img/edit-bg.jpg')"
+>
+  <div class="container position-relative px-4 px-lg-5">
+    <div class="row gx-4 gx-lg-5 justify-content-center">
+      <div class="col-md-10 col-lg-8 col-xl-7">
+        <div class="page-heading">
+          {% if is_edit: %}
+          <h1>Edit Post</h1>
+          {% else: %}
+          <h1>New Post</h1>
+          {% endif %}
+          <span class="subheading"
+            >You're going to make a great blog post!</span
+          >
+        </div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<main class="mb-4">
+  <div class="container">
+    <div class="row">
+      <div class="col-lg-8 col-md-10 mx-auto">
+        {{ ckeditor.load() }} {{ ckeditor.config(name='body') }} {{
+        render_form(form, novalidate=True, button_map={"submit": "primary"}) }}
+      </div>
+    </div>
+  </div>
+</main>
+{% include "footer.html" %} {% endblock %}
+
+############################################# HEADER
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, shrink-to-fit=no"
+    />
+    <meta name="description" content="" />
+    <meta name="author" content="" />
+    <title>Angela's Blog</title>
+    {% block styles %}
+    <!-- Load Bootstrap-Flask CSS here -->
+    {{ bootstrap.load_css() }}
+    <link
+      rel="icon"
+      type="image/x-icon"
+      href="{{ url_for('static', filename='assets/favicon.ico') }}"
+    />
+    <!-- Font Awesome icons (free version)-->
+    <script
+      src="https://use.fontawesome.com/releases/v6.3.0/js/all.js"
+      crossorigin="anonymous"
+    ></script>
+    <!-- Google fonts-->
+    <link
+      href="https://fonts.googleapis.com/css?family=Lora:400,700,400italic,700italic"
+      rel="stylesheet"
+      type="text/css"
+    />
+    <link
+      href="https://fonts.googleapis.com/css?family=Open+Sans:300italic,400italic,600italic,700italic,800italic,400,300,600,700,800"
+      rel="stylesheet"
+      type="text/css"
+    />
+    <!-- Core theme CSS (includes Bootstrap)-->
+    <link
+      href="{{ url_for('static', filename='css/styles.css') }}"
+      rel="stylesheet"
+    />
+    {% endblock %}
+  </head>
+  <body>
+    <!-- Navigation-->
+    <nav class="navbar navbar-expand-lg navbar-light" id="mainNav">
+      <div class="container px-4 px-lg-5">
+        <a class="navbar-brand" href="/">Start Bootstrap</a>
+        <button
+          class="navbar-toggler"
+          type="button"
+          data-bs-toggle="collapse"
+          data-bs-target="#navbarResponsive"
+          aria-controls="navbarResponsive"
+          aria-expanded="false"
+          aria-label="Toggle navigation"
+        >
+          Menu
+          <i class="fas fa-bars"></i>
+        </button>
+        <div class="collapse navbar-collapse" id="navbarResponsive">
+          <ul class="navbar-nav ms-auto py-4 py-lg-0">
+            <li class="nav-item">
+              <a
+                class="nav-link px-lg-3 py-3 py-lg-4"
+                href="{{ url_for('get_all_posts') }}"
+                >Home</a
+              >
+            </li>
+            <!-- TODO: Only show Login/Register if user is logged out. Otherwise show "Log Out" -->
+            {% if not current_user.is_authenticated: %}
+            <li class="nav-item">
+              <a
+                class="nav-link px-lg-3 py-3 py-lg-4"
+                href="{{ url_for('login') }}"
+                >Login</a
+              >
+            </li>
+            <li class="nav-item">
+              <a
+                class="nav-link px-lg-3 py-3 py-lg-4"
+                href="{{ url_for('register') }}"
+                >Register</a
+              >
+            </li>
+            {% else: %}
+
+          <li class="nav-item">
+            <a class="nav-link" href="{{ url_for('logout') }}">Log Out</a>
+          </li>
+            {% endif %}
+            <li class="nav-item">
+              <a
+                class="nav-link px-lg-3 py-3 py-lg-4"
+                href="{{ url_for('about') }}"
+                >About</a
+              >
+            </li>
+            <li class="nav-item">
+              <a
+                class="nav-link px-lg-3 py-3 py-lg-4"
+                href="{{ url_for('contact') }}"
+                >Contact</a
+              >
+            </li>
+          </ul>
+        </div>
+      </div>
+    </nav>
+  </body>
+</html>
+
+
+######################################## FOOTER
+
+        <!-- Footer-->
+        <footer class="border-top">
+          <div class="container px-4 px-lg-5">
+              <div class="row gx-4 gx-lg-5 justify-content-center">
+                  <div class="col-md-10 col-lg-8 col-xl-7">
+                      <ul class="list-inline text-center">
+                          <li class="list-inline-item">
+                              <a href="#!">
+                                  <span class="fa-stack fa-lg">
+                                      <i class="fas fa-circle fa-stack-2x"></i>
+                                      <i class="fab fa-twitter fa-stack-1x fa-inverse"></i>
+                                  </span>
+                              </a>
+                          </li>
+                          <li class="list-inline-item">
+                              <a href="#!">
+                                  <span class="fa-stack fa-lg">
+                                      <i class="fas fa-circle fa-stack-2x"></i>
+                                      <i class="fab fa-facebook-f fa-stack-1x fa-inverse"></i>
+                                  </span>
+                              </a>
+                          </li>
+                          <li class="list-inline-item">
+                              <a href="#!">
+                                  <span class="fa-stack fa-lg">
+                                      <i class="fas fa-circle fa-stack-2x"></i>
+                                      <i class="fab fa-github fa-stack-1x fa-inverse"></i>
+                                  </span>
+                              </a>
+                          </li>
+                      </ul>
+                      <div class="small text-center text-muted fst-italic">Copyright &copy; Your Website 2023</div>
+                  </div>
+              </div>
+          </div>
+      </footer>
+      <!-- Bootstrap core JS-->
+      <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/js/bootstrap.bundle.min.js"></script>
+      <!-- Core theme JS-->
+      <script src="{{ url_for('static', filename='js/scripts.js') }}"></script>
+  </body>
+</html>
+
+
+########################################################## INDEX
+
+{% include "header.html" %}
+
+<!-- Page Header-->
+<header
+  class="masthead"
+  style="background-image: url('../static/assets/img/home-bg.jpg')"
+>
+  <div class="container position-relative px-4 px-lg-5">
+    <div class="row gx-4 gx-lg-5 justify-content-center">
+      <div class="col-md-10 col-lg-8 col-xl-7">
+        <div class="site-heading">
+          <h1>Jerin's Blog</h1>
+          <span class="subheading">A collection of random musings.</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</header>
+<!-- Main Content-->
+<div class="container px-4 px-lg-5">
+  <div class="row gx-4 gx-lg-5 justify-content-center">
+    <div class="col-md-10 col-lg-8 col-xl-7">
+      <!-- Post preview-->
+      {% for post in all_posts %}
+      <div class="post-preview">
+        <a href="{{ url_for('show_post', post_id=post.id) }}">
+          <h2 class="post-title">{{ post.title }}</h2>
+          <h3 class="post-subtitle">{{ post.subtitle }}</h3>
+        </a>
+        <p class="post-meta">
+          Posted by
+<!--          <a href="#">{{post.author}}</a>-->
+          <a href="#">{{post.author.name }}</a>
+          on {{post.date}}
+          <!-- TODO: Only show delete button if user id is 1 (admin user) -->
+          {% if current_user.id == 1: %}
+          <a href="{{url_for('delete_post', post_id=post.id) }}">✘</a>
+          {% endif %}        </p>
+      </div>
+      <!-- Divider-->
+      <hr class="my-4" />
+      {% endfor %}
+
+      <!-- New Post -->
+      <!-- TODO: Only show Create Post button if user id is 1 (admin user) -->
+      {% if current_user.id == 1: %}
+      <div class="d-flex justify-content-end mb-4">
+        <a
+          class="btn btn-primary float-right"
+          href="{{url_for('add_new_post')}}"
+          >Create New Post</a
+        >
+      </div>
+      {% endif %}
+
+      <!-- Pager-->
+      <div class="d-flex justify-content-end mb-4">
+        <a class="btn btn-secondary text-uppercase" href="#!">Older Posts →</a>
+      </div>
+    </div>
+  </div>
+</div>
+
+{% include "footer.html" %}
+
+
+############################################################## LOGIN
+
+{% from "bootstrap5/form.html" import render_form %} {% block content %} {%
+include "header.html" %}
+
+<!-- Page Header -->
+<header
+  class="masthead"
+  style="background-image: url('../static/assets/img/login-bg.jpg')"
+>
+  <div class="container position-relative px-4 px-lg-5">
+    <div class="row gx-4 gx-lg-5 justify-content-center">
+      <div class="col-md-10 col-lg-8 col-xl-7">
+        <div class="page-heading">
+          <h1>Log In</h1>
+          <span class="subheading">Welcome Back!</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<main class="mb-4">
+  <div class="container">
+    <div class="row">
+      <!-- Adding Flash message here for users trying to register twice -->
+      {% with messages = get_flashed_messages() %}
+      {% if messages %}
+      {% for message in messages %}
+      <p class="flash">{{ message }}</p>
+      {% endfor %}
+      {% endif %}
+      {% endwith %}
+      <div class="col-lg-8 col-md-10 mx-auto">
+        <!--Rendering login form here-->
+        {{render_form(form, novalidate=True, button_map={"submit": "primary"}) }}
+      </div>
+    </div>
+  </div>
+</main>
+
+{% include "footer.html" %} {% endblock %}
+
+########################################### REGISTER
+
+{% from "bootstrap5/form.html" import render_form %} {% block content %} {%
+include "header.html" %}
+
+<!-- Page Header -->
+<header
+  class="masthead"
+  style="background-image: url('../static/assets/img/register-bg.jpg')"
+>
+  <div class="container position-relative px-4 px-lg-5">
+    <div class="row gx-4 gx-lg-5 justify-content-center">
+      <div class="col-md-10 col-lg-8 col-xl-7">
+        <div class="page-heading">
+          <h1>Register</h1>
+          <span class="subheading">Start Contributing to the Blog!</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<main class="mb-4">
+  <div class="container">
+    <div class="row">
+      <div class="col-lg-8 col-md-10 mx-auto">
+        <!--TODO: render your registration form here-->
+        <form action="{{ url_for('register') }}" method="post">
+    {{ form.hidden_tag() }}
+    <input type="text" name="name" placeholder="Name" class="custom-class" required="required" /><br>
+    <input type="email" name="email" placeholder="Email" class="custom-class" required="required" /><br>
+    <input type="password" name="password" placeholder="Password" class="custom-class" required="required" /><br>
+    <button type="submit" class="btn btn-primary btn-block btn-large custom-class">Sign me up.</button>
+</form>
+      </div>
+    </div>
+  </div>
+</main>
+
+{% include "footer.html" %} {% endblock %}
+
+
+############################# FORMS.py
+
+from flask_wtf import FlaskForm
+from wtforms import StringField, SubmitField, PasswordField
+from wtforms.validators import DataRequired, URL
+from flask_ckeditor import CKEditorField
+
+
+# WTForm for creating a blog post
+class CreatePostForm(FlaskForm):
+    title = StringField("Blog Post Title", validators=[DataRequired()])
+    subtitle = StringField("Subtitle", validators=[DataRequired()])
+    img_url = StringField("Blog Image URL", validators=[DataRequired(), URL()])
+    body = CKEditorField("Blog Content", validators=[DataRequired()])
+    submit = SubmitField("Submit Post")
+
+
+# TODO: Create a RegisterForm to register new users
+class RegisterForm(FlaskForm):
+    email = StringField("Email", validators=[DataRequired()])
+    password = PasswordField("Password", validators=[DataRequired()])
+    name = StringField("Name", validators=[DataRequired()])
+    submit = SubmitField("Sign Me Up!")
+
+
+
+# TODO: Create a LoginForm to login existing users
+
+
+# TODO: Create a CommentForm so users can leave comments below posts
